@@ -1,0 +1,52 @@
+name: Daily Keirin Scrape
+
+on:
+  schedule:
+    # 毎日 UTC 20:00 = 日本時間(JST, UTC+9) 翌5:00。
+    # ミッドナイト競輪など終了が遅い開催も考慮し、boatrace版(翌4:00)より
+    # 1時間遅い時刻に設定している。「前日のレースが確実に終わっている
+    # 翌朝」に「yesterday」を取得することで、日付境界のタイミング問題を
+    # 構造的に回避する狙いはboatrace版と同じ。
+    - cron: "0 20 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: keirin-daily-scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scraper (yesterday, JST基準)
+        run: python keirin_scraper.py --when yesterday --interval 1.5
+
+      - name: Commit and push data changes
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/keirin.db
+          if git diff --cached --quiet; then
+            echo "No data changes to commit."
+          else
+            git commit -m "chore: update keirin data ($(date -u +'%Y-%m-%d %H:%M UTC'))"
+            git fetch origin main
+            git rebase origin/main
+            git push
+          fi

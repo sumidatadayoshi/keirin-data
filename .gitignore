@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.claude/
+
+# ローカル実行時のログ (GitHub Actions上のログはActionsの実行履歴で確認できるため追跡しない)
+data/*.log
+
+# CSVはSQLiteから再生成できる派生データなので追跡しない
+data/csv/
+
+# --dump-html で保存した検証用の生HTML(サイトの著作物なのでリポジトリには含めない)
+data/dump/
