@@ -52,6 +52,83 @@ if not dates:
     st.warning("データがまだありません。keirin_scraper.py を実行してデータを取得してください。")
     st.stop()
 
+st.sidebar.header("表示モード")
+view_mode = st.sidebar.radio(
+    "表示モード", ["レース別確認", "統計サマリー"], label_visibility="collapsed"
+)
+st.sidebar.divider()
+
+CLASS_ORDER = ["SS", "S1", "S2", "A1", "A2", "A3", "L1"]
+KYAKUSHITSU_ORDER = ["逃", "両", "追"]
+
+
+def render_rate_table(group_col, group_label, order=None):
+    """指定カラムでグルーピングし、出走数・1着数・連対数と各種確率を集計して表示する。"""
+    df = load_df(
+        f"""
+        SELECT e.{group_col} AS grp,
+               COUNT(*) AS 出走数,
+               SUM(CASE WHEN r.rank = 1 THEN 1 ELSE 0 END) AS "1着数",
+               SUM(CASE WHEN r.rank <= 2 THEN 1 ELSE 0 END) AS "2連対数",
+               SUM(CASE WHEN r.rank <= 3 THEN 1 ELSE 0 END) AS "3連対数"
+        FROM entries e
+        LEFT JOIN results r
+            ON e.race_date = r.race_date AND e.venue_code = r.venue_code
+           AND e.rno = r.rno AND e.kumiban = r.kumiban
+        WHERE e.{group_col} IS NOT NULL AND TRIM(e.{group_col}) != ''
+        GROUP BY e.{group_col}
+        """
+    )
+    if df.empty:
+        st.info(f"{group_label}のデータがありません。")
+        return
+
+    df["勝率(%)"] = (df["1着数"] / df["出走数"] * 100).round(1)
+    df["2連対率(%)"] = (df["2連対数"] / df["出走数"] * 100).round(1)
+    df["3連対率(%)"] = (df["3連対数"] / df["出走数"] * 100).round(1)
+
+    if order:
+        df["_order"] = df["grp"].apply(lambda v: order.index(v) if v in order else len(order))
+        df = df.sort_values("_order").drop(columns="_order")
+    else:
+        df = df.sort_values("grp")
+
+    df = df.rename(columns={"grp": group_label}).reset_index(drop=True)
+    st.dataframe(df, hide_index=True, use_container_width=True)
+    st.bar_chart(df.set_index(group_label)["勝率(%)"])
+
+
+if view_mode == "統計サマリー":
+    st.header("📊 統計サマリー(全期間の集計)")
+
+    total_races = int(load_df("SELECT COUNT(*) AS n FROM races")["n"].iloc[0])
+    total_days = int(load_df("SELECT COUNT(DISTINCT race_date) AS n FROM races")["n"].iloc[0])
+    st.caption(
+        f"集計対象: {total_days}日分・{total_races}レース。"
+        "サンプル数が少ないうちは偶然のブレが大きいので、あくまで参考値です。"
+        "日々データが増えるほど数字の信頼度が上がっていきます。"
+    )
+
+    if total_races == 0:
+        st.info("まだ集計できるデータがありません。")
+        st.stop()
+
+    st.subheader("🎯 枠番別 成績")
+    st.caption("枠番(車の並び位置)によって有利不利があるかを見る集計です。")
+    render_rate_table("waku", "枠番", order=list(range(1, 10)))
+
+    st.subheader("🚴 脚質別 成績")
+    st.caption("逃げ(先頭で押し切るタイプ)・追込(後ろから差すタイプ)・両(どちらもできるタイプ)の成績比較です。")
+    render_rate_table("kyaku_shitsu", "脚質", order=KYAKUSHITSU_ORDER)
+
+    st.subheader("🏅 級班別 成績")
+    st.caption("SS・S1・S2・A1・A2・A3・L1(ガールズケイリン)の実力区分ごとの成績です。")
+    render_rate_table("racer_class", "級班", order=CLASS_ORDER)
+
+    st.divider()
+    st.caption(f"DB: {DB_PATH}")
+    st.stop()
+
 st.sidebar.header("レース選択")
 selected_date = st.sidebar.selectbox("日付", dates, format_func=fmt_date)
 
