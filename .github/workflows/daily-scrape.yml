@@ -2,12 +2,14 @@ name: Daily Keirin Scrape
 
 on:
   schedule:
-    # 毎日 UTC 20:00 = 日本時間(JST, UTC+9) 翌5:00。
+    # 毎日 UTC 18:56 = 日本時間(JST, UTC+9) 翌3:56。
+    # ちょうど00分だとGitHub Actions側のスケジュール実行が混雑して
+    # 遅延しやすいため(競艇DB側でも経験済み)、あえて半端な分を指定。
     # ミッドナイト競輪など終了が遅い開催も考慮し、boatrace版(翌4:00)より
     # 1時間遅い時刻に設定している。「前日のレースが確実に終わっている
     # 翌朝」に「yesterday」を取得することで、日付境界のタイミング問題を
     # 構造的に回避する狙いはboatrace版と同じ。
-    - cron: "0 20 * * *"
+    - cron: "56 18 * * *"
   workflow_dispatch: {}
 
 permissions:
