@@ -192,7 +192,7 @@ with tab_entries:
         """SELECT waku AS 枠番, kumiban AS 車番, racer_name AS 選手名, gender AS 性別, racer_class AS 級班,
                   prefecture AS 府県, age AS 年齢, kyu AS 期別, kyaku_shitsu AS 脚質,
                   gear_ratio AS ギヤ倍数, keisoku_tokuten AS 競走得点,
-                  recent_win_rate AS 勝率, recent_2rentai_rate AS 2連対率, recent_3rentai_rate AS 3連対率,
+                  recent_win_rate AS 勝率, recent_2rentai_rate AS "2連対率", recent_3rentai_rate AS "3連対率",
                   forecast_mark AS 予想印
            FROM entries WHERE race_date = ? AND venue_code = ? AND rno = ? ORDER BY kumiban""",
         (selected_date, selected_venue_code, selected_rno),
