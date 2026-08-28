@@ -135,7 +135,11 @@ class PoliteSession:
                 resp = self.session.get(url, timeout=self.timeout)
                 self._last_request_at = time.time()
                 if resp.status_code == 200:
-                    resp.encoding = resp.apparent_encoding or "utf-8"
+                    # apparent_encoding(自動判定)は短い/紛らわしいバイト列で
+                    # 誤判定することがあり、文字化けの原因になる(実際に確認済み)。
+                    # このサイトは常にUTF-8で配信されるため固定する
+                    # (boatrace_scraper.pyと同じ方針)。
+                    resp.encoding = "utf-8"
                     return resp.text
                 if resp.status_code == 404:
                     return None
