@@ -379,7 +379,7 @@ cols[0].metric("天候", race_row["weather"] or "-")
 cols[1].metric("風速", f"{race_row['wind_speed']}m" if pd.notna(race_row["wind_speed"]) else "-")
 cols[2].metric("決まり手", race_row["kimarite"] or "-")
 
-tab_entries, tab_results, tab_payouts = st.tabs(["出走表", "結果", "払戻金"])
+tab_entries, tab_results, tab_payouts, tab_line = st.tabs(["出走表", "結果", "払戻金", "ライン予想"])
 
 with tab_entries:
     entries_df = load_df(
@@ -419,6 +419,32 @@ with tab_payouts:
     else:
         payouts_df["金額"] = payouts_df["金額"].apply(format_yen)
         st.dataframe(payouts_df, hide_index=True, width="stretch")
+
+with tab_line:
+    line_df = load_df(
+        """SELECT lp.line_no AS ライン, lp.position_in_line AS 隊列順, lp.kumiban AS 車番,
+                  lp.role AS 役割, e.racer_name AS 選手名, e.kyaku_shitsu AS 脚質,
+                  e.keisoku_tokuten AS 競走得点, e.forecast_mark AS 予想印
+           FROM line_predictions lp
+           LEFT JOIN entries e
+             ON e.race_date = lp.race_date AND e.venue_code = lp.venue_code
+            AND e.rno = lp.rno AND e.kumiban = lp.kumiban
+           WHERE lp.race_date = ? AND lp.venue_code = ? AND lp.rno = ?
+           ORDER BY lp.line_no, lp.position_in_line""",
+        (selected_date, selected_venue_code, selected_rno),
+    )
+    if line_df.empty:
+        st.info(
+            "ライン予想データがありません(未取得、またはこのレースは対象外の可能性があります)。\n\n"
+            "※ライン予想は2026/09/16以降に取得したレースから収集しています。それ以前のレースにはデータがありません。"
+        )
+    else:
+        for line_no, group in line_df.groupby("ライン"):
+            members = " → ".join(
+                f"{row.車番}番{row.選手名 or ''}({row.役割})" for row in group.itertuples()
+            )
+            st.write(f"**ライン{line_no}**: {members}")
+        st.dataframe(line_df, hide_index=True, width="stretch")
 
 st.divider()
 st.caption(f"DB: {DB_PATH}")

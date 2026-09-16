@@ -33,6 +33,15 @@
     がある。レース数を推測する必要がなく、そこに並んでいるレースだけを
     取得すればよい(get_active_venues)。
 
+  - ライン予想(並び予想): <dl class="racecard_footer-contents"><dt>並び予想</dt>
+    <dd><div class="line_position"> に、<span class="icon_p"> が隊列順に並ぶ。
+    通常のicon_pは車番と役割(先行/追込/自在/押え先など)の2つの内側<span>を持つ。
+    <span class="icon_p space">(中身が空)がライン同士の区切り。先頭付近の
+    「←」だけのicon_p(p000)は凡例的な矢印で選手データではないため無視する。
+    (岐阜1R/2Rの実データで確認済み。ライン構成そのものが持つ情報として、
+    競輪では「どの選手が同じラインで、誰が先頭(先行)/番手(追込)/自在か」が
+    最重要の予想材料の1つ)。
+
 検証には岐阜競輪(2026/08/26, F1 A級一般, 7車立て)の1R・2R(共に決着済み)と、
 同日の開催一覧ページの実HTMLを使った。したがって以下はまだ未検証で、
 実データがずれる可能性がある:
@@ -522,6 +531,57 @@ def parse_payouts(soup):
     return payouts
 
 
+def parse_line_predictions(soup):
+    """並び予想(<dl class="racecard_footer-contents"><dt>並び予想</dt>
+    <dd><div class="line_position">...)を解析し、ライン構成を返す。
+    1ラインは隊列順に並んだ (kumiban, role) のリスト。
+    「←」だけの要素(p000, 凡例的なもの)は選手データではないため無視する。
+    空の<span class="icon_p space">はライン同士の区切り。"""
+    dt = soup.find("dt", string=lambda s: s and nfkc(s) == "並び予想")
+    if dt is None:
+        return []
+    dd = dt.find_next_sibling("dd")
+    if dd is None:
+        return []
+    container = dd.find("div", class_="line_position")
+    if container is None:
+        return []
+
+    lines = []
+    current = []
+    for icon in container.find_all("span", class_="icon_p", recursive=False):
+        classes = icon.get("class") or []
+        if "space" in classes:
+            if current:
+                lines.append(current)
+                current = []
+            continue
+        inner_spans = icon.find_all("span")
+        if len(inner_spans) == 1 and nfkc(inner_spans[0].get_text(strip=True)) == "←":
+            continue
+        if len(inner_spans) < 2:
+            continue
+        kumiban = to_int(inner_spans[0].get_text(strip=True))
+        role = nfkc(inner_spans[1].get_text(strip=True))
+        if kumiban is None:
+            continue
+        current.append({"kumiban": kumiban, "role": role})
+    if current:
+        lines.append(current)
+
+    result = []
+    for line_no, line in enumerate(lines, start=1):
+        for pos, item in enumerate(line, start=1):
+            result.append({
+                "line_no": line_no,
+                "position_in_line": pos,
+                "line_size": len(line),
+                "kumiban": item["kumiban"],
+                "role": item["role"],
+            })
+    return result
+
+
 def parse_race_detail(html_text):
     soup = BeautifulSoup(html_text, "lxml")
     race_info = parse_race_header(soup)
@@ -530,11 +590,12 @@ def parse_race_detail(html_text):
     if kimarite:
         race_info["kimarite"] = kimarite
     payouts = parse_payouts(soup)
+    line_predictions = parse_line_predictions(soup)
 
     for e in entries:
         e["gender"] = "女" if race_info.get("is_girls") else "男"
 
-    return race_info, entries, results, payouts
+    return race_info, entries, results, payouts, line_predictions
 
 
 # ---------------------------------------------------------------------------
@@ -610,6 +671,20 @@ CREATE TABLE IF NOT EXISTS payouts (
     popularity TEXT,
     fetched_at TEXT,
     PRIMARY KEY (race_date, venue_code, rno, bet_type, combination)
+);
+
+CREATE TABLE IF NOT EXISTS line_predictions (
+    race_date TEXT NOT NULL,
+    venue_code TEXT NOT NULL,
+    venue_name TEXT,
+    rno INTEGER NOT NULL,
+    line_no INTEGER NOT NULL,
+    position_in_line INTEGER NOT NULL,
+    line_size INTEGER,
+    kumiban INTEGER NOT NULL,
+    role TEXT,
+    fetched_at TEXT,
+    PRIMARY KEY (race_date, venue_code, rno, kumiban)
 );
 
 CREATE TABLE IF NOT EXISTS scrape_log (
@@ -689,6 +764,18 @@ def save_payouts(conn, race_date, venue_code, venue_name, rno, payouts, fetched_
         )
 
 
+def save_line_predictions(conn, race_date, venue_code, venue_name, rno, line_predictions, fetched_at):
+    for lp in line_predictions:
+        conn.execute(
+            """INSERT OR REPLACE INTO line_predictions
+            (race_date, venue_code, venue_name, rno, line_no, position_in_line, line_size,
+             kumiban, role, fetched_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (race_date, venue_code, venue_name, rno, lp["line_no"], lp["position_in_line"],
+             lp["line_size"], lp["kumiban"], lp["role"], fetched_at),
+        )
+
+
 # ---------------------------------------------------------------------------
 # メイン処理
 # ---------------------------------------------------------------------------
@@ -719,7 +806,7 @@ def scrape_day(date_str, db_path, interval_sec=1.5):
                 logger.warning("slug=%s %dR取得失敗: %s", slug, rno, url)
                 continue
 
-            race_info, entries, results, payouts = parse_race_detail(html_text)
+            race_info, entries, results, payouts, line_predictions = parse_race_detail(html_text)
             if not entries:
                 logger.warning("slug=%s %dRは出走データを抽出できませんでした(ページ構造が想定と異なる可能性)。", slug, rno)
                 continue
@@ -733,12 +820,14 @@ def scrape_day(date_str, db_path, interval_sec=1.5):
                 save_results(conn, date_str, venue_code, venue_name, rno, results, fetched_at)
             if payouts:
                 save_payouts(conn, date_str, venue_code, venue_name, rno, payouts, fetched_at)
+            if line_predictions:
+                save_line_predictions(conn, date_str, venue_code, venue_name, rno, line_predictions, fetched_at)
 
             conn.commit()
             races_count += 1
             logger.info(
-                "slug=%s %dR 保存完了 (entries=%d, results=%d, payouts=%d)",
-                slug, rno, len(entries), len(results), len(payouts),
+                "slug=%s %dR 保存完了 (entries=%d, results=%d, payouts=%d, line=%d)",
+                slug, rno, len(entries), len(results), len(payouts), len(line_predictions),
             )
 
     races_total = conn.execute(
