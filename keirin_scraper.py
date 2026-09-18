@@ -864,6 +864,22 @@ def scrape_day(date_str, db_path, interval_sec=1.5):
     return len(venues), races_count, status
 
 
+def normalize_date_arg(value):
+    """'20250918'のほか'2025-09-18'や'2025/09/18'のような区切り文字入りでも
+    受け付けられるように正規化する。数字8桁にならない場合はNoneを返す
+    (呼び出し側でエラーメッセージを出す)。"""
+    if value is None:
+        return None
+    digits = re.sub(r"[^0-9]", "", value)
+    if len(digits) != 8:
+        return None
+    try:
+        datetime.strptime(digits, "%Y%m%d")
+    except ValueError:
+        return None
+    return digits
+
+
 def date_range(start_date, end_date):
     """YYYYMMDD文字列2つの間(両端含む)を1日刻みのYYYYMMDD文字列リストで返す。"""
     start = datetime.strptime(start_date, "%Y%m%d")
@@ -970,15 +986,32 @@ def main():
 
     if args.start_date or args.end_date:
         if not (args.start_date and args.end_date):
-            parser.error("--start-date と --end-date は両方一緒に指定してください。")
-        if args.start_date > args.end_date:
-            parser.error("--start-date は --end-date 以前の日付にしてください。")
+            parser.error(
+                f"--start-date と --end-date は両方一緒に指定してください "
+                f"(受け取った値: --start-date={args.start_date!r} --end-date={args.end_date!r})。"
+            )
+        start_norm = normalize_date_arg(args.start_date)
+        end_norm = normalize_date_arg(args.end_date)
+        if start_norm is None:
+            parser.error(
+                f"--start-date の形式が正しくありません(受け取った値: {args.start_date!r})。"
+                f"YYYYMMDD形式(例: 20250918)で指定してください。"
+            )
+        if end_norm is None:
+            parser.error(
+                f"--end-date の形式が正しくありません(受け取った値: {args.end_date!r})。"
+                f"YYYYMMDD形式(例: 20251211)で指定してください。"
+            )
+        if start_norm > end_norm:
+            parser.error(
+                f"--start-date({start_norm})は --end-date({end_norm})以前の日付にしてください。"
+            )
         logger.info(
             "KEIRINバックフィル開始: %s 〜 %s db=%s interval=%.1fs",
-            args.start_date, args.end_date, args.db, args.interval,
+            start_norm, end_norm, args.db, args.interval,
         )
         ok_days, partial_days, failed_days, _ = backfill_range(
-            args.start_date, args.end_date, args.db, interval_sec=args.interval
+            start_norm, end_norm, args.db, interval_sec=args.interval
         )
         if failed_days > 0 or partial_days > 0:
             logger.warning(

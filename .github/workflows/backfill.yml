@@ -52,10 +52,13 @@ jobs:
 
       - name: Run backfill (${{ github.event.inputs.start_date }} 〜 ${{ github.event.inputs.end_date }})
         run: |
+          echo "start_date=${{ github.event.inputs.start_date }}"
+          echo "end_date=${{ github.event.inputs.end_date }}"
+          echo "interval=${{ github.event.inputs.interval }}"
           python keirin_scraper.py \
             --start-date "${{ github.event.inputs.start_date }}" \
             --end-date "${{ github.event.inputs.end_date }}" \
-            --interval "${{ github.event.inputs.interval }}"
+            --interval "${{ github.event.inputs.interval || '1.5' }}"
 
       - name: Commit and push data changes
         if: always()
