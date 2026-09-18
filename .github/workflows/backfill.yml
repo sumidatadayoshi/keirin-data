@@ -1,0 +1,81 @@
+name: Keirin Backfill (Manual)
+
+# 過去データの手動バックフィル用ワークフロー。
+# 1年分(約365日)をまとめて回すとGitHub Actionsの1ジョブの実行時間上限
+# (GitHub提供ランナーは最大6時間)を超えるため、四半期(約3ヶ月)単位など、
+# start_date〜end_dateを短めに区切って複数回に分けて実行することを想定している。
+# 1日あたりの取得は通常の日次スクレイプと同じ scrape_day() を使い回すため、
+# データの形式(entries/results/payouts/line_predictions)は完全に同一。
+#
+# 実行方法: GitHubの「Actions」タブ → このワークフロー → 「Run workflow」→
+# start_date / end_date を YYYYMMDD 形式で入力(例: 20250101〜20250331)。
+#
+# 同時に複数のバックフィルジョブを走らせるとサイトへの同時アクセスが増えて
+# しまうため、concurrencyで直列化している(前のジョブが終わるまで次は待機)。
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "取得開始日 (YYYYMMDD)"
+        required: true
+      end_date:
+        description: "取得終了日 (YYYYMMDD、この日を含む)"
+        required: true
+      interval:
+        description: "リクエスト間隔(秒)"
+        required: false
+        default: "1.5"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: keirin-daily-scrape
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run backfill (${{ github.event.inputs.start_date }} 〜 ${{ github.event.inputs.end_date }})
+        run: |
+          python keirin_scraper.py \
+            --start-date "${{ github.event.inputs.start_date }}" \
+            --end-date "${{ github.event.inputs.end_date }}" \
+            --interval "${{ github.event.inputs.interval }}"
+
+      - name: Commit and push data changes
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/keirin.db
+          if git diff --cached --quiet; then
+            echo "No data changes to commit."
+          else
+            git commit -m "chore: backfill keirin data (${{ github.event.inputs.start_date }} - ${{ github.event.inputs.end_date }})"
+            git fetch origin main
+            git rebase origin/main
+            git push
+          fi
+
+      - name: Upload scraper log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-log-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}
+          path: data/scraper.log
+          retention-days: 14

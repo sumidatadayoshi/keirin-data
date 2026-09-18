@@ -864,6 +864,53 @@ def scrape_day(date_str, db_path, interval_sec=1.5):
     return len(venues), races_count, status
 
 
+def date_range(start_date, end_date):
+    """YYYYMMDD文字列2つの間(両端含む)を1日刻みのYYYYMMDD文字列リストで返す。"""
+    start = datetime.strptime(start_date, "%Y%m%d")
+    end = datetime.strptime(end_date, "%Y%m%d")
+    days = []
+    cur = start
+    while cur <= end:
+        days.append(cur.strftime("%Y%m%d"))
+        cur += timedelta(days=1)
+    return days
+
+
+def backfill_range(start_date, end_date, db_path, interval_sec=1.5):
+    """start_date〜end_date(両端含む, YYYYMMDD)を1日ずつ過去に遡って取得する。
+    過去日の取得は現行のscrape_dayをそのまま使い回せる
+    (racedetailページは直近数年分なら出走表・結果・払戻金・並び予想が
+    1ページに揃っていることを実データで確認済み)。
+    1日分の取得に失敗しても(例外・部分取得とも)ログに残して次の日へ進み、
+    長時間のバックフィル全体を1日の失敗で止めないようにする。"""
+    days = date_range(start_date, end_date)
+    logger.info("バックフィル開始: %s 〜 %s (%d日分)", start_date, end_date, len(days))
+
+    ok_days = 0
+    partial_days = 0
+    failed_days = 0
+    total_races = 0
+
+    for i, date_str in enumerate(days, start=1):
+        logger.info("--- [%d/%d] %s の取得を開始 ---", i, len(days), date_str)
+        try:
+            _, races_count, status = scrape_day(date_str, db_path, interval_sec=interval_sec)
+            total_races += races_count
+            if status == "ok":
+                ok_days += 1
+            else:
+                partial_days += 1
+        except Exception:
+            failed_days += 1
+            logger.exception("%s の取得中に例外が発生しました。この日をスキップして続行します。", date_str)
+
+    logger.info(
+        "バックフィル完了: %s 〜 %s / 成功=%d日 partial=%d日 failed=%d日 / 取得レース数合計=%d",
+        start_date, end_date, ok_days, partial_days, failed_days, total_races,
+    )
+    return ok_days, partial_days, failed_days, total_races
+
+
 def dump_html(venue_slug, day_id, rno, out_dir="data/dump"):
     """指定レースの生HTMLをファイルに保存するだけのデバッグ用関数。DBには触れない。"""
     session = PoliteSession()
@@ -884,6 +931,8 @@ def main():
     parser.add_argument("--date", help="取得対象日 (YYYYMMDD)。--whenより優先。")
     parser.add_argument("--when", choices=["today", "yesterday"], default="yesterday",
                          help="--date省略時に基準にする日。デフォルトは'yesterday'。")
+    parser.add_argument("--start-date", help="バックフィル用: 取得開始日(YYYYMMDD)。--end-dateと併用。")
+    parser.add_argument("--end-date", help="バックフィル用: 取得終了日(YYYYMMDD、この日を含む)。--start-dateと併用。")
     parser.add_argument("--db", default=str(Path(__file__).parent / "data" / "keirin.db"), help="SQLiteファイルのパス")
     parser.add_argument("--interval", type=float, default=1.5, help="リクエスト間隔(秒)。デフォルト1.5秒。")
     parser.add_argument("--log", default=str(Path(__file__).parent / "data" / "scraper.log"), help="ログファイルのパス")
@@ -917,6 +966,26 @@ def main():
         if not args.venue_slug or not args.day_id:
             parser.error("--dump-html には --venue-slug と --day-id が必要です。")
         dump_html(args.venue_slug, args.day_id, args.rno)
+        return
+
+    if args.start_date or args.end_date:
+        if not (args.start_date and args.end_date):
+            parser.error("--start-date と --end-date は両方一緒に指定してください。")
+        if args.start_date > args.end_date:
+            parser.error("--start-date は --end-date 以前の日付にしてください。")
+        logger.info(
+            "KEIRINバックフィル開始: %s 〜 %s db=%s interval=%.1fs",
+            args.start_date, args.end_date, args.db, args.interval,
+        )
+        ok_days, partial_days, failed_days, _ = backfill_range(
+            args.start_date, args.end_date, args.db, interval_sec=args.interval
+        )
+        if failed_days > 0 or partial_days > 0:
+            logger.warning(
+                "一部の日でデータが不完全でした(partial=%d日, failed=%d日)。"
+                "スクレイパー自体は正常終了しますが、ログを確認してください。",
+                partial_days, failed_days,
+            )
         return
 
     logger.info("KEIRINデータ取得開始: date=%s db=%s interval=%.1fs", date_str, args.db, args.interval)
