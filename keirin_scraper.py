@@ -531,6 +531,145 @@ def parse_payouts(soup):
     return payouts
 
 
+# ---------------------------------------------------------------------------
+# オッズ(事前オッズ)の取得。
+#
+# 2026-09-19に彦根1R(?pageType=odds&kakeshikiType=2shatan)の実HTMLをdump_htmlで
+# 確認して判明した構造:
+#   - 券種ごとに <div id="JS_ODDSCONTENTS_{key}"> という別々のブロックが
+#     *全券種分まとめて* 静的HTMLに含まれている(JSの「1着の選択」タブ切替は
+#     CSSのdisplay切り替えだけで、データ自体はどのタブでも全部埋め込み済み)。
+#     そのためkakeshikiTypeパラメータを変えても実は取れる中身は同じはず
+#     (未検証。差が無ければURLパラメータ自体省略できる可能性がある)。
+#   - 2車単は <table class="odds_table"> の中に、行=1着候補・列=2着候補の
+#     N×N行列がそのまま入っている。行/列のヘッダーは<th class="n{車番}">。
+#     自分自身との組み合わせは<td class="empty">。発売なしは"9999.9"。
+#   - 3連単は同じ id 配下に「1着の選択」タブ(1〜N)ごとに別々の<table>が
+#     並んでいて、行=2着候補・列=3着候補になっている(3次元なので1テーブル
+#     では表現できず、1着で分割されている)。3連複も同様の可能性が高い。
+#     今回はこの3次元形式は複雑なため未対応(必要になったら追加する)。
+# 2車複・ワイド・枠単・枠複はまだ実物のHTMLで確認できていないが、2車単と
+# 同じ<table class="odds_table">形式である可能性が高いとみて同じロジックで
+# 解析を試みる。もし構造が違えば0件になるだけで例外にはならない(安全側)。
+# ---------------------------------------------------------------------------
+
+ODDS_CONTENT_IDS = {
+    "2車単": ("JS_ODDSCONTENTS_2shatan", "-"),
+    "2車複": ("JS_ODDSCONTENTS_2shahuku", "="),
+    "ワイド": ("JS_ODDSCONTENTS_wide", "="),
+    "枠単": ("JS_ODDSCONTENTS_niwakutan", "-"),
+    "枠複": ("JS_ODDSCONTENTS_niwakufuku", "="),
+    # 3連単・3連複は1着ごとに複数テーブルに分かれる3次元形式のため未対応。
+}
+
+
+def _parse_odds_table(table):
+    """<table class="odds_table">(行=1着候補・列=2着候補のN×N行列)を
+    [(row_num, col_num, odds), ...]のリストに変換する。想定と異なる構造なら
+    黙って[]を返す。"""
+    rows = table.find_all("tr")
+    if len(rows) < 3:
+        return []
+    # 1行目: 列ヘッダー(車番)。class="n{数字}"を持つ<th>だけを対象にする
+    # (rowspan=2の左上・右上の空セルには番号classが付かないので自然に除外される)。
+    col_numbers = []
+    for th in rows[0].find_all("th"):
+        num = None
+        for c in th.get("class") or []:
+            if re.fullmatch(r"n\d+", c):
+                num = int(c[1:])
+        if num is not None:
+            col_numbers.append(num)
+    if not col_numbers:
+        return []
+
+    out = []
+    # 3行目以降がデータ行(2行目は選手名の行)。
+    for tr in rows[2:]:
+        ths = tr.find_all("th")
+        if not ths:
+            continue
+        row_num = None
+        for c in ths[0].get("class") or []:
+            if re.fullmatch(r"n\d+", c):
+                row_num = int(c[1:])
+        if row_num is None:
+            continue
+        tds = tr.find_all("td")
+        if len(tds) != len(col_numbers):
+            continue  # 想定外の列数、安全のためこの行は捨てる
+        for col_num, td in zip(col_numbers, tds):
+            if "empty" in (td.get("class") or []):
+                continue
+            if row_num == col_num:
+                continue
+            odds_text = nfkc(td.get_text(" ", strip=True))
+            # ワイドなど一部の券種は「2.5～9.0」のような幅(レンジ)表記になる。
+            # nfkc()で全角チルダ(～)は半角(~)に正規化されるので、分割は半角側で行う。
+            # その場合は下限側(より保守的な値)をoddsとして採用する。
+            odds_text = odds_text.split("~")[0].strip()
+            try:
+                odds_val = float(odds_text)
+            except (TypeError, ValueError):
+                continue
+            out.append((row_num, col_num, odds_val))
+    return out
+
+
+def parse_odds(soup):
+    """事前オッズページ(?pageType=odds)を解析する。上記の注記を参照。
+    対応している券種(2車単・2車複・ワイド・枠単・枠複)ごとに
+    <div id="JS_ODDSCONTENTS_{key}">内の<table class="odds_table">を探し、
+    見つからない券種は静かにスキップする(発売なし、または未対応の3連単・
+    3連複形式の場合)。"""
+    results = []
+    for bt, (div_id, sep) in ODDS_CONTENT_IDS.items():
+        div = soup.find(id=div_id)
+        if div is None:
+            continue
+        table = div.find("table", class_="odds_table")
+        if table is None:
+            continue
+        seen = set()
+        for row_num, col_num, odds_val in _parse_odds_table(table):
+            if sep == "-":
+                combo = f"{row_num}-{col_num}"
+            else:
+                combo = f"{min(row_num, col_num)}={max(row_num, col_num)}"
+            if combo in seen:
+                continue
+            seen.add(combo)
+            results.append({"bet_type": bt, "combination": combo, "odds": odds_val})
+    if not results:
+        logger.warning("オッズページから何も抽出できませんでした(ページ構造が想定と異なる可能性、要検証)。")
+    return results
+
+
+# 実HTML(2026-09-19、彦根1R)を検証した結果判明した券種ごとのURLパラメータ名。
+# ページ内の<a class="JS_POST_THROW" href="...?pageType=odds&kakeshikiType=...">
+# から採取。枠単・枠複(niwakutan/niwakufuku)はレースによってはリンク自体が
+# 存在しない(発売がない)ことがある。
+ODDS_KAKESHIKI_TYPES = {
+    "3連単": "3rentan",
+    "2車単": "2shatan",
+    "3連複": "3renhuku",
+    "2車複": "2shahuku",
+    "ワイド": "wide",
+    "枠単": "niwakutan",
+    "枠複": "niwakufuku",
+}
+
+
+def odds_url(slug, day_id, rno, kakeshiki_type=None):
+    """race_url()と同じレースの、事前オッズページのURLを組み立てる。
+    kakeshiki_typeを指定しない場合、サイト側のデフォルト("3rentan"=3連単)が
+    表示される点に注意(2車単・2車複・ワイドなどを取るには明示的な指定が必須)。"""
+    url = race_url(slug, day_id, rno) + "?pageType=odds"
+    if kakeshiki_type:
+        url += f"&kakeshikiType={kakeshiki_type}"
+    return url
+
+
 def parse_line_predictions(soup):
     """並び予想(<dl class="racecard_footer-contents"><dt>並び予想</dt>
     <dd><div class="line_position">...)を解析し、ライン構成を返す。
@@ -687,6 +826,18 @@ CREATE TABLE IF NOT EXISTS line_predictions (
     PRIMARY KEY (race_date, venue_code, rno, kumiban)
 );
 
+CREATE TABLE IF NOT EXISTS odds (
+    race_date TEXT NOT NULL,
+    venue_code TEXT NOT NULL,
+    venue_name TEXT,
+    rno INTEGER NOT NULL,
+    bet_type TEXT NOT NULL,
+    combination TEXT NOT NULL,
+    odds REAL,
+    fetched_at TEXT,
+    PRIMARY KEY (race_date, venue_code, rno, bet_type, combination)
+);
+
 CREATE TABLE IF NOT EXISTS scrape_log (
     race_date TEXT NOT NULL,
     started_at TEXT,
@@ -761,6 +912,16 @@ def save_payouts(conn, race_date, venue_code, venue_name, rno, payouts, fetched_
             VALUES (?,?,?,?,?,?,?,?,?)""",
             (race_date, venue_code, venue_name, rno, p["bet_type"], p["combination"], p["payout"],
              p["popularity"], fetched_at),
+        )
+
+
+def save_odds(conn, race_date, venue_code, venue_name, rno, odds_list, fetched_at):
+    for o in odds_list:
+        conn.execute(
+            """INSERT OR REPLACE INTO odds
+            (race_date, venue_code, venue_name, rno, bet_type, combination, odds, fetched_at)
+            VALUES (?,?,?,?,?,?,?,?)""",
+            (race_date, venue_code, venue_name, rno, o["bet_type"], o["combination"], o["odds"], fetched_at),
         )
 
 
@@ -864,6 +1025,67 @@ def scrape_day(date_str, db_path, interval_sec=1.5):
     return len(venues), races_count, status
 
 
+def scrape_odds_once(date_str, db_path, interval_sec=1.5):
+    """指定日の「まだ結果が出ていないレース」の事前オッズを1周分だけ取得して保存する。
+    entries/results等と違いオッズはレース直前まで刻一刻と変わるため、この関数を
+    GitHub Actionsのcronなどで日中に繰り返し(例: 30分おき)呼び出すことを想定している。
+    1回のリクエストで2車単・2車複・ワイド(・発売があれば枠単・枠複)が全部
+    まとめて取れることを実HTMLで確認済みなので、kakeshikiTypeは指定しない。
+    resultsテーブルに既に結果がある(=レース終了済み)場合はオッズ取得をスキップする
+    (無駄なリクエストを避け、かつ「発走直前に近い最後に取れたオッズ」を自然に
+    DBに残すため — 終了後に取得すると「発売終了」の値で上書きしてしまう恐れがある)。"""
+    session = PoliteSession(interval_sec=interval_sec)
+    conn = get_connection(db_path)
+
+    venues = get_active_venues(session, date_str)
+    if not venues:
+        logger.info("オッズ取得: %s は開催中の競輪場が見つかりませんでした。", date_str)
+        conn.close()
+        return 0, 0
+
+    fetched_races = 0
+    skipped_finished = 0
+    total_odds_rows = 0
+    for venue in venues:
+        slug = venue["slug"]
+        day_id = venue.get("day_id")
+        venue_code = (day_id[0:2] if day_id else venue["races"][0][1].rsplit("/racedetail/", 1)[-1][:2])
+
+        for rno, _card_url in venue["races"]:
+            already_finished = conn.execute(
+                "SELECT 1 FROM results WHERE race_date=? AND venue_code=? AND rno=? LIMIT 1",
+                (date_str, venue_code, rno),
+            ).fetchone()
+            if already_finished:
+                skipped_finished += 1
+                continue
+
+            url = odds_url(slug, day_id, rno)
+            html_text = session.get(url)
+            if html_text is None:
+                logger.warning("オッズ取得失敗: slug=%s %dR %s", slug, rno, url)
+                continue
+
+            soup = BeautifulSoup(html_text, "lxml")
+            odds_list = parse_odds(soup)
+            if not odds_list:
+                continue
+            fetched_at = datetime.now().isoformat(timespec="seconds")
+            venue_name = venue.get("venue_name") or slug
+            save_odds(conn, date_str, venue_code, venue_name, rno, odds_list, fetched_at)
+            conn.commit()
+            fetched_races += 1
+            total_odds_rows += len(odds_list)
+            logger.info("オッズ保存: slug=%s %dR %d件", slug, rno, len(odds_list))
+
+    conn.close()
+    logger.info(
+        "オッズ取得完了: %s (取得レース数=%d, 件数=%d, 終了済みでスキップ=%d)",
+        date_str, fetched_races, total_odds_rows, skipped_finished,
+    )
+    return fetched_races, total_odds_rows
+
+
 def normalize_date_arg(value):
     """'20250918'のほか'2025-09-18'や'2025/09/18'のような区切り文字入りでも
     受け付けられるように正規化する。数字8桁にならない場合はNoneを返す
@@ -927,19 +1149,67 @@ def backfill_range(start_date, end_date, db_path, interval_sec=1.5):
     return ok_days, partial_days, failed_days, total_races
 
 
-def dump_html(venue_slug, day_id, rno, out_dir="data/dump"):
-    """指定レースの生HTMLをファイルに保存するだけのデバッグ用関数。DBには触れない。"""
+def dump_html(venue_slug, day_id, rno, out_dir="data/dump", page_type="card", kakeshiki_type=None):
+    """指定レースの生HTMLをファイルに保存するだけのデバッグ用関数。DBには触れない。
+    page_type="odds"で事前オッズページ(?pageType=odds)を保存できる
+    (parse_odds()の検証用。実HTMLを見て正しくパースできているか確認するのに使う)。
+    kakeshiki_type(例: "2shatan")を指定しないと、サイト側のデフォルト(3連単)が
+    返ってくる点に注意。"""
     session = PoliteSession()
     url = race_url(venue_slug, day_id, rno)
+    suffix = ""
+    if page_type == "odds":
+        url = odds_url(venue_slug, day_id, rno, kakeshiki_type=kakeshiki_type)
+        suffix = f"_odds_{kakeshiki_type}" if kakeshiki_type else "_odds"
     html_text = session.get(url)
     if html_text is None:
         logger.error("取得失敗: %s", url)
         return None
     Path(out_dir).mkdir(parents=True, exist_ok=True)
-    out_path = Path(out_dir) / f"{venue_slug}_{day_id}_{rno:02d}.html"
+    out_path = Path(out_dir) / f"{venue_slug}_{day_id}_{rno:02d}{suffix}.html"
     out_path.write_text(html_text, encoding="utf-8")
     logger.info("保存しました: %s (%s)", out_path, url)
     return str(out_path)
+
+
+def test_odds(venue_slug, day_id, rno, date_str=None):
+    """事前オッズページを取得してparse_odds()にかけ、結果件数と冒頭数件をログに
+    出すだけの検証用コマンド。DBには一切書き込まない。--with-oddsを本運用で
+    有効にする前に、これで実際の抽出結果を目視確認することを想定している。
+    venue_slug/day_idを省略しdate_strだけ渡した場合、その日に開催中の最初の
+    会場・最初のレースを自動的に選んで検証する(手動でURLからslug/day_idを
+    調べる手間を省くため)。"""
+    session = PoliteSession()
+    if not venue_slug or not day_id:
+        if not date_str:
+            logger.error("venue_slug/day_idを省略する場合はdate_strが必要です。")
+            return
+        venues = get_active_venues(session, date_str)
+        if not venues:
+            logger.error("%s: 開催中の会場が見つかりませんでした。", date_str)
+            return
+        v = venues[0]
+        venue_slug = v["slug"]
+        day_id = v.get("day_id")
+        if not day_id:
+            logger.error("%s会場のday_idが取得できませんでした。", venue_slug)
+            return
+        rno = v["races"][0][0] if v["races"] else 1
+        logger.info("自動選択: venue_slug=%s day_id=%s rno=%d", venue_slug, day_id, rno)
+    url = odds_url(venue_slug, day_id, rno)
+    html_text = session.get(url)
+    if html_text is None:
+        logger.error("取得失敗: %s", url)
+        return
+    soup = BeautifulSoup(html_text, "lxml")
+    odds_list = parse_odds(soup)
+    logger.info("URL: %s", url)
+    logger.info("抽出件数: %d件", len(odds_list))
+    by_type = {}
+    for o in odds_list:
+        by_type.setdefault(o["bet_type"], []).append(o)
+    for bt, items in by_type.items():
+        logger.info("  %s: %d件 (例: %s)", bt, len(items), items[:5])
 
 
 def main():
@@ -956,9 +1226,29 @@ def main():
     parser.add_argument("--dump-html", action="store_true",
                          help="DBに保存せず、指定レースの生HTMLをファイルに保存して終了する(検証用)。"
                               "--venue-slug と --day-id を合わせて指定する。")
-    parser.add_argument("--venue-slug", help="--dump-html用: 例 gifu")
-    parser.add_argument("--day-id", help="--dump-html用: 14桁の開催日ID(末尾00)。例 43202608240300")
-    parser.add_argument("--rno", type=int, default=1, help="--dump-html用: レース番号")
+    parser.add_argument("--page-type", choices=["card", "odds"], default="card",
+                         help="--dump-html用: 'odds'を指定すると出走表ではなく事前オッズページ"
+                              "(?pageType=odds)を保存する。デフォルトは'card'(通常の出走表ページ)。")
+    parser.add_argument("--kakeshiki-type",
+                         choices=list(ODDS_KAKESHIKI_TYPES.values()),
+                         help="--dump-html --page-type odds用: 券種を指定する"
+                              "(例: 2shatan=2車単, 2shahuku=2車複, wide=ワイド, 3rentan=3連単)。"
+                              "省略時はサイト側のデフォルト(3連単)が返る。")
+    parser.add_argument("--test-odds", action="store_true",
+                         help="DBに保存せず、指定レースの事前オッズページを取得してparse_odds()に"
+                              "かけ、抽出結果をログに出すだけで終了する(検証用)。"
+                              "--venue-slug と --day-id を合わせて指定する。")
+    parser.add_argument("--venue-slug", help="--dump-html/--test-odds用: 例 gifu")
+    parser.add_argument("--day-id", help="--dump-html/--test-odds用: 14桁の開催日ID(末尾00)。例 43202608240300")
+    parser.add_argument("--rno", type=int, default=1, help="--dump-html/--test-odds用: レース番号")
+
+    parser.add_argument("--scrape-odds", action="store_true",
+                         help="--date/--whenで指定した日の、まだ結果が出ていないレースの"
+                              "事前オッズを1周分だけ取得してDBに保存し終了する。オッズは"
+                              "発走直前まで変わり続けるため、この1回だけの実行を日中"
+                              "繰り返し呼び出す(GitHub Actionsのcron等)運用を想定している。"
+                              "通常のentries/results等の取得(--start-date/--end-date指定なし"
+                              "の通常実行)とは別物。")
     args = parser.parse_args()
 
     if args.date:
@@ -981,7 +1271,17 @@ def main():
     if args.dump_html:
         if not args.venue_slug or not args.day_id:
             parser.error("--dump-html には --venue-slug と --day-id が必要です。")
-        dump_html(args.venue_slug, args.day_id, args.rno)
+        dump_html(args.venue_slug, args.day_id, args.rno, page_type=args.page_type,
+                  kakeshiki_type=args.kakeshiki_type)
+        return
+
+    if args.test_odds:
+        test_odds(args.venue_slug, args.day_id, args.rno, date_str=date_str)
+        return
+
+    if args.scrape_odds:
+        logger.info("オッズ取得開始: date=%s db=%s interval=%.1fs", date_str, args.db, args.interval)
+        scrape_odds_once(date_str, args.db, interval_sec=args.interval)
         return
 
     if args.start_date or args.end_date:

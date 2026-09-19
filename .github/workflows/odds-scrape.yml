@@ -1,0 +1,61 @@
+name: Keirin Odds Scrape
+
+# entries/results/payouts等と違い、事前オッズは発走直前まで変わり続けるデータ。
+# daily-scrape.yml(前日分をまとめて翌朝取得)とは別に、レースが行われている
+# 時間帯(JST 9:00〜22:30、日中〜ナイター開催をカバー)に30分おきに巡回し、
+# その時点でまだ結果が出ていないレースのオッズだけを取得・保存する。
+# 深夜のミッドナイト競輪(発走〜0:30頃)は今回のスケジュールでは対象外
+# (必要になれば後で範囲を広げる)。
+#
+# 1回の実行は「その時点の未終了レース」を1周するだけの軽い処理
+# (--scrape-odds)。daily-scrape.yml/backfill.ymlと同じconcurrency groupに
+# 入れて、data/keirin.dbへの同時書き込みによる衝突を避けている。
+
+on:
+  schedule:
+    # UTC 0:00〜13:30の間、30分おき(=JST 9:00〜22:30)。
+    - cron: "*/30 0-13 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: keirin-daily-scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape-odds:
+    runs-on: ubuntu-latest
+    # 1周あたりは通常数分程度で終わる想定(開催中の未終了レース数×約1.5秒間隔)。
+    # 30分おきに起動するため、次の起動と重ならない範囲で余裕を持たせている。
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Scrape current odds (today, JST基準)
+        run: python keirin_scraper.py --scrape-odds --when today --interval 1.5
+
+      - name: Commit and push data changes
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/keirin.db
+          if git diff --cached --quiet; then
+            echo "No data changes to commit."
+          else
+            git commit -m "chore: update keirin odds ($(date -u +'%Y-%m-%d %H:%M UTC'))"
+            git fetch origin main
+            git rebase origin/main
+            git push
+          fi
