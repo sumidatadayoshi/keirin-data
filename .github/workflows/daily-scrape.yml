@@ -1,5 +1,11 @@
 name: Daily Keirin Scrape
 
+# 【DB分割について】
+# data/keirin.db が GitHub の1ファイル上限(100MiB)に達してpushが失敗するようになったため、
+# keirin.db(〜2026/9/29分)は凍結し、新しいデータは data/keirin_2026q4.db に保存する。
+# keirin_2026q4.db が80MiB前後になったら、次の期間用(例: keirin_2027q1.db)に切り替えること。
+# 解析・ダッシュボード用には merge_db.py で両方を統合した data/keirin_all.db を作る。
+
 on:
   schedule:
     # 毎日 UTC 18:56 = 日本時間(JST, UTC+9) 翌3:56。
@@ -9,7 +15,10 @@ on:
     # 1時間遅い時刻に設定している。「前日のレースが確実に終わっている
     # 翌朝」に「yesterday」を取得することで、日付境界のタイミング問題を
     # 構造的に回避する狙いはboatrace版と同じ。
-    - cron: "56 18 * * *"
+    # 【重要】楽天Kドリームスは毎日 1:00〜7:00(JST)がシステムメンテナンスで全ページが
+    # 取得できない。以前の 18:56 UTC(=JST 3:56)はこの時間帯に当たり、0レースを「成功」と
+    # 記録していた。メンテ明けの JST 8:30(=23:30 UTC)に変更した。
+    - cron: "30 23 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -36,14 +45,14 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run scraper (yesterday, JST基準)
-        run: python keirin_scraper.py --when yesterday --interval 1.5
+        run: python keirin_scraper.py --when yesterday --interval 1.5 --db data/keirin_2026q4.db
 
       - name: Commit and push data changes
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/keirin.db
+          git add data/keirin_2026q4.db
           if git diff --cached --quiet; then
             echo "No data changes to commit."
           else

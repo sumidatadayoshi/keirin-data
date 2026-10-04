@@ -30,7 +30,9 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-DB_PATH = Path(__file__).parent / "data" / "keirin.db"
+# merge_db.py で作った統合DB(keirin.db + keirin_2026q4.db)があればそちらを優先する
+_ALL_DB = Path(__file__).parent / "data" / "keirin_all.db"
+DB_PATH = _ALL_DB if _ALL_DB.exists() else Path(__file__).parent / "data" / "keirin.db"
 
 # 「狙い目レース分析」の判定条件・関連定数。
 # 2026/08/24〜2026/09/10の実データ(1083レース)で検証し、単独条件より

@@ -1,5 +1,11 @@
 name: Keirin Odds Scrape
 
+# 【DB分割について】
+# data/keirin.db が GitHub の1ファイル上限(100MiB)に達してpushが失敗するようになったため、
+# keirin.db(〜2026/9/29分)は凍結し、新しいデータは data/keirin_2026q4.db に保存する。
+# keirin_2026q4.db が80MiB前後になったら、次の期間用(例: keirin_2027q1.db)に切り替えること。
+# 解析・ダッシュボード用には merge_db.py で両方を統合した data/keirin_all.db を作る。
+
 # entries/results/payouts等と違い、事前オッズは発走直前まで変わり続けるデータ。
 # daily-scrape.yml(前日分をまとめて翌朝取得)とは別に、レースが行われている
 # 時間帯(JST 9:00〜22:30、日中〜ナイター開催をカバー)に30分おきに巡回し、
@@ -43,14 +49,14 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Scrape current odds (today, JST基準)
-        run: python keirin_scraper.py --scrape-odds --when today --interval 1.5
+        run: python keirin_scraper.py --scrape-odds --when today --interval 1.5 --db data/keirin_2026q4.db
 
       - name: Commit and push data changes
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/keirin.db
+          git add data/keirin_2026q4.db
           if git diff --cached --quiet; then
             echo "No data changes to commit."
           else

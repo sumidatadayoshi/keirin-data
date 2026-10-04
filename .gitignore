@@ -8,5 +8,8 @@ data/*.log
 # CSVはSQLiteから再生成できる派生データなので追跡しない
 data/csv/
 
+# merge_db.py で作る統合DB(keirin.db + keirin_2026q4.db)。ローカル専用。
+data/keirin_all.db
+
 # --dump-html で保存した検証用の生HTML(サイトの著作物なのでリポジトリには含めない)
 data/dump/

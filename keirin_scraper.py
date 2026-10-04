@@ -122,6 +122,13 @@ def to_float(s):
     return float(m.group()) if m else None
 
 
+class SiteMaintenance(Exception):
+    """楽天Kドリームスがシステムメンテナンス中(毎日 1:00〜7:00 JST)で、データが取れない。"""
+
+
+MAINTENANCE_MARKER = "システムメンテナンス中"
+
+
 class PoliteSession:
     """アクセス間隔を必ず空けるrequests.Sessionのラッパー(boatrace_scraper.pyと同型)。"""
 
@@ -149,6 +156,12 @@ class PoliteSession:
                     # このサイトは常にUTF-8で配信されるため固定する
                     # (boatrace_scraper.pyと同じ方針)。
                     resp.encoding = "utf-8"
+                    # メンテナンス中は全URLが同じ「メンテ中」ページ(HTTP 200)を返す。
+                    # 0レースの「成功」として記録しないよう、ここで例外にする。
+                    if MAINTENANCE_MARKER in resp.text:
+                        raise SiteMaintenance(
+                            f"Kドリームスはメンテナンス中です(1:00〜7:00 JST)。7時以降に再実行してください: {url}"
+                        )
                     return resp.text
                 if resp.status_code == 404:
                     return None
@@ -1138,6 +1151,8 @@ def backfill_range(start_date, end_date, db_path, interval_sec=1.5):
                 ok_days += 1
             else:
                 partial_days += 1
+        except SiteMaintenance:
+            raise
         except Exception:
             failed_days += 1
             logger.exception("%s の取得中に例外が発生しました。この日をスキップして続行します。", date_str)
@@ -1329,4 +1344,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SiteMaintenance as exc:
+        logger.error("%s", exc)
+        logger.error("取得を中止しました(DBには「成功」として記録していません)。終了コード75で終了します。")
+        sys.exit(75)

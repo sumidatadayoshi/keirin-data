@@ -58,14 +58,15 @@ jobs:
           python keirin_scraper.py \
             --start-date "${{ github.event.inputs.start_date }}" \
             --end-date "${{ github.event.inputs.end_date }}" \
-            --interval "${{ github.event.inputs.interval || '1.5' }}"
+            --interval "${{ github.event.inputs.interval || '1.5' }}" \
+            --db data/keirin_2026q4.db
 
       - name: Commit and push data changes
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/keirin.db
+          git add data/keirin_2026q4.db
           if git diff --cached --quiet; then
             echo "No data changes to commit."
           else
